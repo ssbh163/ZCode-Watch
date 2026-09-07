@@ -1,0 +1,35 @@
+#!/usr/bin/env node
+/**
+ * 跨平台悬浮窗启动器(插件 SessionStart hook 每会话调用一次)
+ *
+ * 按当前设备选择对应 UI 的悬浮窗:
+ *   Windows → WPF 多卡片悬浮窗(chrome-watch-widget.ps1,经 widget-launch.vbs)
+ *   其他    → 静默跳过(macOS 原生 HUD 为后续扩展,架构预留此分发点)
+ *
+ * 语义:已有实例在运行时,通过 touch 唤醒文件把它唤回显示(不抢焦点);没有则静默拉起。
+ */
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const dir = path.dirname(fileURLToPath(import.meta.url));
+
+if (process.platform === 'win32') {
+  // 先 touch 唤醒文件:已在运行的悬浮窗 250ms 内轮询到 mtime 变化即唤回(毫秒级、不再新起 PowerShell)
+  const wakeFile = path.join(os.homedir(), '.zcode', 'scripts', 'chrome-watch-widget.wake');
+  const now = new Date();
+  try { fs.utimesSync(wakeFile, now, now); } catch {
+    try {
+      fs.mkdirSync(path.dirname(wakeFile), { recursive: true });
+      fs.writeFileSync(wakeFile, '');
+    } catch { }
+  }
+  // 再拉起 VBS 兜底冷启动:无实例时启动并显示;已有实例在互斥量处快速静默退出(唤醒已由上面的文件完成)
+  const vbs = path.join(dir, 'widget-launch.vbs');
+  if (fs.existsSync(vbs)) {
+    spawn('wscript.exe', [vbs], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  }
+}
+process.exit(0);
