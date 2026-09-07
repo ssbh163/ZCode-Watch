@@ -1,5 +1,5 @@
 {
-  "name": "zcode-watch-marketplace",
+  "name": "zcode-plugins-personal",
   "description": "zcode-watch:多 API Key 的 GLM Coding Plan 月度用量监控插件市场。",
   "owner": { "name": "zcode-watch contributors" },
   "plugins": [
