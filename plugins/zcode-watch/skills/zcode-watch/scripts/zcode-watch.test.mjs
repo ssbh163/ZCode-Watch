@@ -1,5 +1,5 @@
-// chrome-watch 纯函数单测(node --test,零依赖)
-// 运行:node --test plugins/chrome-watch/skills/chrome-watch/scripts/chrome-watch.test.mjs
+// zcode-watch 纯函数单测(node --test,零依赖)
+// 运行:node --test plugins/zcode-watch/skills/zcode-watch/scripts/zcode-watch.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -7,7 +7,7 @@ import {
   monthKeyOf, monthStartOf, nextMonthStartOf, dayKeyOf, fmtDateTime,
   peakWindowsBetween, weightedOf, parseConfig, resetCacheIfStale,
   fmtTokens, maskKey, daysUntilReset,
-} from './chrome-watch.mjs';
+} from './zcode-watch.mjs';
 
 // 日历事实:2026-09-01 是周二,09-05 周六,09-06 周日,09-07 周一
 const D = (s) => new Date(s); // 'new Date("2026-09-07T13:00:00")' 按 Git Bash 本地时区解析

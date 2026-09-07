@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * chrome-watch —— 多把 GLM Coding Plan API Key 的自然月用量监控(零依赖,Node >= 18)
+ * zcode-watch —— 多把 GLM Coding Plan API Key 的自然月用量监控(零依赖,Node >= 18)
  *
  * 数据来源(与 zcode-usage 相同的智谱官方监控接口,不消耗 prompt 额度):
  *   GET {origin}/api/monitor/usage/quota/limit                    —— 套餐档位 level
  *   GET {origin}/api/monitor/usage/model-usage?startTime=&endTime= —— 区间 token 用量
  *   origin:bigmodel → https://open.bigmodel.cn;zai → https://api.z.ai
  *
- * 配置:~/.zcode/chrome-watch.json(手动 / 会话内助手维护,格式见 README)
- * 缓存:~/.zcode/chrome-watch-cache.json(机器生成:已闭窗工作日的高峰 token + lastResult)
+ * 配置:~/.zcode/zcode-watch.json(手动 / 会话内助手维护,格式见 README)
+ * 缓存:~/.zcode/zcode-watch-cache.json(机器生成:已闭窗工作日的高峰 token + lastResult)
  *
  * 月度口径:自然月(当月 1 日 00:00 本地时间起,每月 1 号自动重置);
  * 加权总量 = 非高峰×1 + 高峰×3;高峰 = 工作日(周一至五)14:00–18:00。
@@ -32,14 +32,14 @@ const PROVIDER_ORIGIN = {
   bigmodel: 'https://open.bigmodel.cn',
   zai: 'https://api.z.ai',
 };
-const CONFIG_FILE = path.join(os.homedir(), '.zcode', 'chrome-watch.json');
-const CACHE_FILE = path.join(os.homedir(), '.zcode', 'chrome-watch-cache.json');
+const CONFIG_FILE = path.join(os.homedir(), '.zcode', 'zcode-watch.json');
+const CACHE_FILE = path.join(os.homedir(), '.zcode', 'zcode-watch-cache.json');
 const FETCH_TIMEOUT = 10000;
 const HOOK_FETCH_TIMEOUT = 5000;
 const LAST_RESULT_FRESH_MS = 60 * 60 * 1000; // hook 注入可接受的 lastResult 新鲜度
 const PEAK_BACKFILL_BATCH = 5; // 月中首刷回填的并发批次
 
-// ---------- 纯函数(export 供 chrome-watch.test.mjs 单测) ----------
+// ---------- 纯函数(export 供 zcode-watch.test.mjs 单测) ----------
 const z2 = (n) => String(n).padStart(2, '0');
 export const monthKeyOf = (d) => `${d.getFullYear()}-${z2(d.getMonth() + 1)}`;
 export const dayKeyOf = (d) => `${monthKeyOf(d)}-${z2(d.getDate())}`;
@@ -353,7 +353,7 @@ function renderKeyCard(k, now) {
 function renderEmpty() {
   return [
     '未配置任何 API Key。添加方式(二选一):',
-    '  1. 在 ZCode 对话里说:「添加一个 chrome-watch key,名字 xx,Key 是 xxx」',
+    '  1. 在 ZCode 对话里说:「添加一个 zcode-watch key,名字 xx,Key 是 xxx」',
     `  2. 手动编辑 ${CONFIG_FILE},格式:`,
     '     { "keys": [ { "id": "key-1", "name": "主力", "provider": "bigmodel",',
     '                   "apiKey": "你的Key", "monthlyQuota": 1750000000 } ] }',
@@ -380,7 +380,7 @@ async function main() {
     } catch { /* hook 失败静默,不阻塞会话启动 */ }
     const exhausted = (payload?.keys || []).filter((k) => !k.error && k.exhausted);
     const line = exhausted.length
-      ? `【chrome-watch】⚠ ${exhausted.length} 把 Key 本月已用满 100%,建议删除:${exhausted.map((k) => `「${k.name} ${k.keyTail}」`).join(' ')}`
+      ? `【zcode-watch】⚠ ${exhausted.length} 把 Key 本月已用满 100%,建议删除:${exhausted.map((k) => `「${k.name} ${k.keyTail}」`).join(' ')}`
       : '';
     console.log(JSON.stringify({
       hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: line },
@@ -413,7 +413,7 @@ async function main() {
 
   const ok = payload.keys.filter((k) => !k.error).length;
   console.log(rule('━'));
-  console.log(bold(` ⚡ chrome-watch · ${payload.month} 月度用量 · ${payload.keys.length} 把 Key(${ok} 把正常)`));
+  console.log(bold(` ⚡ zcode-watch · ${payload.month} 月度用量 · ${payload.keys.length} 把 Key(${ok} 把正常)`));
   console.log(dim(`    ${now.toLocaleString('zh-CN')} · 加 --json 看原始数据`));
   for (const k of payload.keys) {
     console.log('');

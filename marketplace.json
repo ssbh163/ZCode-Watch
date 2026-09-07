@@ -1,11 +1,11 @@
 {
-  "name": "chrome-watch-marketplace",
-  "description": "chrome-watch:多 API Key 的 GLM Coding Plan 月度用量监控插件市场。",
-  "owner": { "name": "chrome-watch contributors" },
+  "name": "zcode-watch-marketplace",
+  "description": "zcode-watch:多 API Key 的 GLM Coding Plan 月度用量监控插件市场。",
+  "owner": { "name": "zcode-watch contributors" },
   "plugins": [
     {
-      "name": "chrome-watch",
-      "source": "./plugins/chrome-watch",
+      "name": "zcode-watch",
+      "source": "./plugins/zcode-watch",
       "category": "development",
       "description": "手动登记多把 GLM Coding Plan API Key,监控每把 Key 的自然月加权用量(高峰×3 + 非高峰×1)、进度条与满额删除提醒。"
     }

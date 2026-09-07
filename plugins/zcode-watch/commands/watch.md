@@ -3,9 +3,9 @@ description: 查询多把 GLM Coding Plan API Key 的自然月用量(高峰×3+�
 allowed-tools: Bash, Read
 ---
 
-# chrome-watch 多 Key 月度用量
+# zcode-watch 多 Key 月度用量
 
-使用 Skill 工具调用 `chrome-watch:chrome-watch` 技能执行一次查询(如技能不可用,按技能文档直接运行其 scripts/chrome-watch.mjs 脚本)。
+使用 Skill 工具调用 `zcode-watch:zcode-watch` 技能执行一次查询(如技能不可用,按技能文档直接运行其 scripts/zcode-watch.mjs 脚本)。
 
 ## 汇报要求
 
@@ -21,4 +21,4 @@ allowed-tools: Bash, Read
 - **只执行一次查询**,无论成功失败,立即返回结果,不要重试
 - 不要改写或猜测数字,一切以脚本输出为准
 - **已用满 100%(exhausted)的 Key,明确建议用户删除**
-- 失败时原样展示错误信息,并提示检查 `~/.zcode/chrome-watch.json` 中的 apiKey;Key 的添加/删除可直接在对话里完成(技能文档有代管说明)
+- 失败时原样展示错误信息,并提示检查 `~/.zcode/zcode-watch.json` 中的 apiKey;Key 的添加/删除可直接在对话里完成(技能文档有代管说明)

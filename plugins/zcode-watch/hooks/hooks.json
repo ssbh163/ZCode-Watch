@@ -6,13 +6,13 @@
           {
             "type": "process",
             "command": "node",
-            "args": ["${ZCODE_PLUGIN_ROOT}/skills/chrome-watch/scripts/widget-launch.mjs"],
+            "args": ["${ZCODE_PLUGIN_ROOT}/skills/zcode-watch/scripts/widget-launch.mjs"],
             "timeoutMs": 10000,
-            "statusMessage": "确保 chrome-watch 悬浮窗在运行(Windows)"
+            "statusMessage": "确保 zcode-watch 悬浮窗在运行(Windows)"
           },
           {
             "type": "command",
-            "command": "node \"${ZCODE_PLUGIN_ROOT}/skills/chrome-watch/scripts/chrome-watch.mjs\" --hook",
+            "command": "node \"${ZCODE_PLUGIN_ROOT}/skills/zcode-watch/scripts/zcode-watch.mjs\" --hook",
             "timeoutMs": 8000,
             "statusMessage": "检查是否有 Key 本月已用满(仅满额时注入提醒)"
           }

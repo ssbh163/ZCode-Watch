@@ -1,28 +1,28 @@
-﻿# chrome-watch 桌面悬浮窗(Windows PowerShell 5.1+,零依赖,纯 UI 壳)
+﻿# zcode-watch 桌面悬浮窗(Windows PowerShell 5.1+,零依赖,纯 UI 壳)
 # 布局沿用 zcode-usage-widget 的规格:372 宽 / 18 内边距 / 16 圆角 / 6px 胶囊进度条 / macOS 标签色阶梯
-# 本脚本只做渲染,不含任何取数/计算逻辑——全部来自 node chrome-watch.mjs --json(单份正本,两端数字永不打架)
-# 配色与 ZCode 外观主题保持一致(探测 ZCode 窗口实际配色,深浅同步);CHROME_WATCH_THEME=light|dark 可强制
+# 本脚本只做渲染,不含任何取数/计算逻辑——全部来自 node zcode-watch.mjs --json(单份正本,两端数字永不打架)
+# 配色与 ZCode 外观主题保持一致(探测 ZCode 窗口实际配色,深浅同步);ZCODE_WATCH_THEME=light|dark 可强制
 # 生命周期与插件绑定:由插件 SessionStart hook 拉起,插件卸载(本脚本被删)后自动退出
 $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 
 # 单实例保护 + 唤醒通道:必须放在 Add-Type/XAML 等耗时初始化之前,
 # 否则主实例启动头几秒内到达的唤醒信号(事件尚未创建/轮询尚未开始)会被静默丢弃
-$mutex = New-Object System.Threading.Mutex($false, 'Global\Chrome-Watch-Widget')
+$mutex = New-Object System.Threading.Mutex($false, 'Global\ZCode-Watch-Widget')
 $ownsMutex = $false
 try { $ownsMutex = $mutex.WaitOne(0) } catch { $ownsMutex = $true }
 if (-not $ownsMutex) {
   if ($args -notcontains 'NoShowIfExists') {
     # 手动再次启动:唤醒已有窗口(事件由主实例拿到互斥量后立即创建,无需重试)
-    try { [System.Threading.EventWaitHandle]::OpenExisting('Global\Chrome-Watch-Widget-Show').Set() | Out-Null } catch { }
+    try { [System.Threading.EventWaitHandle]::OpenExisting('Global\ZCode-Watch-Widget-Show').Set() | Out-Null } catch { }
   }
   exit
 }
 # 主实例:立即创建唤醒事件(initialState=false,不会误触发)
-$showEvt = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, 'Global\Chrome-Watch-Widget-Show')
+$showEvt = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, 'Global\ZCode-Watch-Widget-Show')
 
 # 唤醒文件:SessionStart hook(新会话)touch 一次,运行中的实例轮询到 mtime 变化即唤回
-$wakeFile = Join-Path $env:USERPROFILE '.zcode\scripts\chrome-watch-widget.wake'
+$wakeFile = Join-Path $env:USERPROFILE '.zcode\scripts\zcode-watch-widget.wake'
 $script:lastWake = if (Test-Path $wakeFile) { (Get-Item $wakeFile).LastWriteTimeUtc } else { [datetime]::MinValue }
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
@@ -62,9 +62,9 @@ Add-Type -Namespace CWNative -Name ZCodeProbe -MemberDefinition @'
 '@
 
 # 查询脚本定位:优先 ~/.zcode/scripts(独立安装),其次插件缓存(随插件分发)
-$scriptPath = Join-Path $env:USERPROFILE '.zcode\scripts\chrome-watch.mjs'
+$scriptPath = Join-Path $env:USERPROFILE '.zcode\scripts\zcode-watch.mjs'
 if (-not (Test-Path $scriptPath)) {
-  $cached = Get-ChildItem "$env:USERPROFILE\.zcode\cli\plugins\cache\*\chrome-watch\*\skills\chrome-watch\scripts\chrome-watch.mjs" |
+  $cached = Get-ChildItem "$env:USERPROFILE\.zcode\cli\plugins\cache\*\zcode-watch\*\skills\zcode-watch\scripts\zcode-watch.mjs" |
     Sort-Object FullName -Descending | Select-Object -First 1
   if ($cached) { $scriptPath = $cached.FullName }
 }
@@ -84,14 +84,14 @@ function Resolve-Node {
 }
 $script:nodeExe = Resolve-Node
 
-$configFile = Join-Path $env:USERPROFILE '.zcode\chrome-watch.json'
+$configFile = Join-Path $env:USERPROFILE '.zcode\zcode-watch.json'
 $configDir = Split-Path $configFile
 
 # 面板 372 宽;pad 18;圆角 16;内容宽 = 372 - 36 - 20(窗口 Margin 10×2)= 316
 $xamlText = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="chrome-watch" Topmost="True" WindowStyle="None" AllowsTransparency="True"
+        Title="zcode-watch" Topmost="True" WindowStyle="None" AllowsTransparency="True"
         Background="Transparent" ShowInTaskbar="False" ResizeMode="NoResize" ShowActivated="False"
         Width="372" SizeToContent="Height">
   <Window.Resources>
@@ -118,7 +118,7 @@ $xamlText = @'
           Margin="10" Padding="18">
     <DockPanel>
       <Grid DockPanel.Dock="Top" Height="20">
-        <TextBlock Text="⚡ chrome-watch" FontSize="14" FontWeight="Bold" Foreground="{DynamicResource LabelBrush}"
+        <TextBlock Text="⚡ zcode-watch" FontSize="14" FontWeight="Bold" Foreground="{DynamicResource LabelBrush}"
                    VerticalAlignment="Center"/>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
           <TextBlock x:Name="BtnRefresh" Text="↻" FontSize="13" Foreground="{DynamicResource SecondaryBrush}" Cursor="Hand"
@@ -148,7 +148,7 @@ $BtnClose = & $el 'BtnClose'
 $CardsHost = & $el 'CardsHost'
 
 # 初始位置:主屏右上角;有保存位置且在屏幕范围内则恢复
-$posFile = Join-Path $env:USERPROFILE '.zcode\scripts\chrome-watch-widget.pos.json'
+$posFile = Join-Path $env:USERPROFILE '.zcode\scripts\zcode-watch-widget.pos.json'
 $wa = [System.Windows.SystemParameters]::WorkArea
 $win.Left = $wa.Right - $win.Width - 26
 $win.Top = $wa.Top + 16
@@ -174,7 +174,7 @@ $bc = New-Object System.Windows.Media.BrushConverter
 function Brush($hex) { $script:bc.ConvertFromString($hex) }
 
 # —— 主题:与 ZCode 外观保持一致(像素探测 ZCode 主窗口侧边栏),不读写任何 Windows 主题设置 ——
-$themeOverride = $env:CHROME_WATCH_THEME
+$themeOverride = $env:ZCODE_WATCH_THEME
 $themes = @{
   dark = @{ Label='#FFFFFF'; Secondary='#A6FFFFFF'; Value='#8CFFFFFF'; Tertiary='#80FFFFFF'
             Quaternary='#24FFFFFF'; Track='#24FFFFFF'; Separator='#2EFFFFFF'; Border='#1AFFFFFF'
@@ -339,7 +339,7 @@ function Clear-Cards { $CardsHost.Children.Clear() }
 function Show-EmptyState {
   Clear-Cards
   [void]$CardsHost.Children.Add((New-MessageCard '未配置 API Key' `
-    ("配置文件:$configFile`n右键菜单 → 「编辑 Key 配置…」可创建并打开;`n也可在 ZCode 对话里说:「添加一个 chrome-watch key,名字 xx,Key 是 xxx」" ) `
+    ("配置文件:$configFile`n右键菜单 → 「编辑 Key 配置…」可创建并打开;`n也可在 ZCode 对话里说:「添加一个 zcode-watch key,名字 xx,Key 是 xxx」" ) `
     '#FFA94D'))
 }
 
@@ -364,7 +364,7 @@ function Invoke-Refresh {
   }
   if ($d.empty -or -not $d.keys -or @($d.keys).Count -eq 0) {
     Show-EmptyState
-    $Meta.Text = 'chrome-watch'
+    $Meta.Text = 'zcode-watch'
     return
   }
   Clear-Cards
@@ -467,7 +467,7 @@ $zcodeTimer.Add_Tick({
     $script:isDark = $dark
     Apply-Theme
     try {
-      Add-Content -Path (Join-Path $env:USERPROFILE '.zcode\scripts\chrome-watch-theme.log') `
+      Add-Content -Path (Join-Path $env:USERPROFILE '.zcode\scripts\zcode-watch-theme.log') `
         -Value ("{0} -> {1}" -f (Get-Date -Format 'MM/dd HH:mm:ss'), $(if ($dark) { 'dark' } else { 'light' }))
     } catch { }
   }
@@ -519,7 +519,7 @@ $menuItems['退出'].Add_Click({
 # 应用主题(与 ZCode 外观一致);此后 zcodeTimer 每 2 秒探测 ZCode 配色并跟随切换
 $script:isDark = Get-IsDarkTheme
 try { Apply-Theme } catch {
-  try { Add-Content (Join-Path $env:USERPROFILE '.zcode\scripts\chrome-watch-theme.log') ("startup Apply-Theme THREW: " + $_.Exception.Message) } catch { }
+  try { Add-Content (Join-Path $env:USERPROFILE '.zcode\scripts\zcode-watch-theme.log') ("startup Apply-Theme THREW: " + $_.Exception.Message) } catch { }
 }
 
 Invoke-Refresh
