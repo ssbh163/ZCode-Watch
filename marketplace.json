@@ -1,6 +1,5 @@
 {
   "name": "chrome-watch-marketplace",
-  "version": "0.1.0",
   "description": "chrome-watch:多 API Key 的 GLM Coding Plan 月度用量监控插件市场。",
   "owner": { "name": "chrome-watch contributors" },
   "plugins": [
