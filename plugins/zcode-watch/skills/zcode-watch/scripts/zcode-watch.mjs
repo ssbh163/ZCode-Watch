@@ -4,16 +4,29 @@
  *
  * 数据来源(与 zcode-usage 相同的智谱官方监控接口,不消耗 prompt 额度):
  *   GET {origin}/api/monitor/usage/quota/limit                    —— 套餐档位 level
- *   GET {origin}/api/monitor/usage/model-usage?startTime=&endTime= —— 区间 token 用量
+ *   GET {origin}/api/monitor/usage/model-usage?startTime=&endTime= —— 区间用量 + 逐小时序列
  *   origin:bigmodel → https://open.bigmodel.cn;zai → https://api.z.ai
  *
+ * 高峰/非高峰拆分(2026-09 实测结论,见 PROJECT.md §5):
+ *   接口返回的 x_time/tokensUsage 小时序列是权威口径(求和与 totalUsage 分毫不差);
+ *   高峰 = 工作日(周一至五)14:00–17:59 小时桶求和(左闭右开,18 点桶属非高峰)。
+ *   不再用独立的峰窗区间查询——服务端对当天区间会把 endTime 截到当前时刻,
+ *   晚间查询会把全天算进高峰;且区间 endTime 桶为包含语义,会把 18–19 点多算进去。
+ *
+ * 取数策略(滚动窗口 + 按天缓存):
+ *   每次刷新查 [max(月初, 需要的最早日期 00:00) → 现在],按 ≤7 天分段保证小时粒度
+ *   (跨度 ≥13 天会退化为天粒度,≥37 天直接报错);endTime 永远 ≤ 现在。
+ *   过去的天写进按天缓存 {tokens, peak};今天只实时显示不落盘。
+ *   fetchFrom 取「第一个缺失的过去日」与「昨天」的较早者:
+ *   - 稳态 = [昨天 00:00 → 现在] 单请求(昨天整天顺路带回,服务端微调可自愈);
+ *   - 断档后首刷自动分段补齐缺口(≤5 个请求/Key,一次性)。
+ *   稳态请求预算:每 Key 每次 2 个(档位 + 滚动窗口)。
+ *
  * 配置:~/.zcode/zcode-watch.json(手动 / 会话内助手维护,格式见 README)
- * 缓存:~/.zcode/zcode-watch-cache.json(机器生成:已闭窗工作日的高峰 token + lastResult)
+ * 缓存:~/.zcode/zcode-watch-cache.json(机器生成:按天结算值 + lastResult,勿手改)
  *
  * 月度口径:自然月(当月 1 日 00:00 本地时间起,每月 1 号自动重置);
- * 加权总量 = 非高峰×1 + 高峰×3;高峰 = 工作日(周一至五)14:00–18:00。
- * 请求预算:稳态每 Key 每次 3 个请求(档位 + 月度总量 + 今日高峰),
- * 已闭窗的工作日高峰 token 永不再变,查一次入缓存;月中首刷回填 ≤22 请求/Key。
+ * 加权总量 = 非高峰×1 + 高峰×3。
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -26,8 +39,8 @@ const asHook = argv.includes('--hook');
 
 // ---------- 常量 ----------
 export const DEFAULT_MONTHLY_QUOTA = 1750000000; // 17.5 亿加权 token
-export const PEAK_START_HOUR = 14;
-export const PEAK_END_HOUR = 18;
+export const PEAK_HOURS = [14, 15, 16, 17]; // 高峰 = 工作日 14:00–17:59 的小时桶
+const CHUNK_MAX_DAYS = 7; // 单段最大跨度:≥13 天接口会退化为天粒度,7 天留足余量
 const PROVIDER_ORIGIN = {
   bigmodel: 'https://open.bigmodel.cn',
   zai: 'https://api.z.ai',
@@ -37,7 +50,6 @@ const CACHE_FILE = path.join(os.homedir(), '.zcode', 'zcode-watch-cache.json');
 const FETCH_TIMEOUT = 10000;
 const HOOK_FETCH_TIMEOUT = 5000;
 const LAST_RESULT_FRESH_MS = 60 * 60 * 1000; // hook 注入可接受的 lastResult 新鲜度
-const PEAK_BACKFILL_BATCH = 5; // 月中首刷回填的并发批次
 
 // ---------- 纯函数(export 供 zcode-watch.test.mjs 单测) ----------
 const z2 = (n) => String(n).padStart(2, '0');
@@ -47,28 +59,62 @@ export function monthStartOf(d) { return new Date(d.getFullYear(), d.getMonth(),
 export function nextMonthStartOf(d) { return new Date(d.getFullYear(), d.getMonth() + 1, 1); }
 export const fmtDateTime = (d) => `${dayKeyOf(d)} ${z2(d.getHours())}:${z2(d.getMinutes())}:${z2(d.getSeconds())}`;
 
+/** 解析序列桶标签。小时标签 '2026-09-07 14:00' → {date, hour};天标签 '2026-09-07' → hour=null。
+ *  纯字符串切片:x_time 是服务端北京时间字符串,不经过 Date 解析,客户端时区无关。 */
+export function parseBucketLabel(label) {
+  const s = String(label || '');
+  const date = s.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { date: s, hour: null };
+  const hour = s.length >= 13 ? Number(s.slice(11, 13)) : NaN;
+  return { date, hour: Number.isFinite(hour) ? hour : null };
+}
+
+/** 由 'YYYY-MM-DD' 算星期(0=周日)。走 Date.UTC,不吃本机时区。 */
+export function weekdayOfDateStr(dateStr) {
+  const [y, m, d] = String(dateStr).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+
+/** 高峰桶判定:工作日 14:00–17:59(18 点桶 = 18:00–19:00,属非高峰) */
+export function isPeakBucket(dateStr, hour) {
+  if (hour === null || hour === undefined) return false;
+  const dow = weekdayOfDateStr(dateStr);
+  return dow >= 1 && dow <= 5 && PEAK_HOURS.includes(hour);
+}
+
+/** 小时序列按天聚合:{ 'YYYY-MM-DD': { tokens, peak, calls } };天粒度标签抛错 */
+export function splitSeriesByDay(xTime, tokensUsage, modelCallCount) {
+  const days = {};
+  (xTime || []).forEach((label, i) => {
+    const { date, hour } = parseBucketLabel(label);
+    if (hour === null) throw new Error(`接口返回非小时粒度(${label}),无法拆分高峰`);
+    const t = Number(tokensUsage?.[i]) || 0;
+    const c = Number(modelCallCount?.[i]) || 0;
+    const agg = (days[date] = days[date] || { tokens: 0, peak: 0, calls: 0 });
+    agg.tokens += t;
+    agg.calls += c;
+    if (isPeakBucket(date, hour)) agg.peak += t;
+  });
+  return days;
+}
+
 /**
- * 枚举 [monthStart, now] 内每个工作日的高峰窗口(周一至五 14:00–18:00,本地时间)。
- * 规则:now 未过当日 14:00 的天跳过;end 截到 now;
- * closed = now 已过当日 18:00 —— 该窗口的 token 从此不再变化,可安全缓存。
+ * 取数分段:[fetchFrom(某日 00:00), now] 切成 ≤7 天的段。
+ * 相邻段边界用 23:59:59 —— 接口的 endTime 桶是包含语义,
+ * 若下一段从上段 endTime 的整点起,交界处那个小时桶会被两段重复计入。
+ * now 恰好落在边界上时不产生零宽末段。
  */
-export function peakWindowsBetween(monthStart, now) {
-  const out = [];
-  const lastDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()); // 今天 00:00
-  for (let d = new Date(monthStart); d.getTime() <= lastDay.getTime(); d.setDate(d.getDate() + 1)) {
-    const dow = d.getDay();
-    if (dow === 0 || dow === 6) continue; // 周末无高峰
-    const start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), PEAK_START_HOUR);
-    if (now.getTime() <= start.getTime()) continue; // 窗口未开始
-    const hardEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), PEAK_END_HOUR);
-    out.push({
-      day: dayKeyOf(d),
-      start,
-      end: now.getTime() < hardEnd.getTime() ? new Date(now.getTime()) : hardEnd,
-      closed: now.getTime() >= hardEnd.getTime(),
-    });
+export function chunkFetchRanges(fetchFrom, now, maxDays = CHUNK_MAX_DAYS) {
+  const DAY = 86400000, SEC = 1000;
+  const ranges = [];
+  let start = new Date(fetchFrom);
+  while (start.getTime() < now.getTime()) {
+    const hardEnd = start.getTime() + maxDays * DAY; // 下一段起点(整点)
+    const end = hardEnd <= now.getTime() ? new Date(hardEnd - SEC) : new Date(now.getTime());
+    ranges.push({ start: new Date(start), end });
+    start = new Date(hardEnd);
   }
-  return out;
+  return ranges;
 }
 
 /** 总使用额度(加权)= 非高峰×1 + 高峰×3 */
@@ -102,7 +148,7 @@ export function parseConfig(text) {
 /** 缓存月份不匹配(进入新自然月)→ 整体清空:月度重置的实现点 */
 export function resetCacheIfStale(cache, monthKey) {
   if (cache.month !== monthKey) {
-    return { version: 1, month: monthKey, peakDays: {}, lastResult: null };
+    return { version: 2, month: monthKey, days: {}, lastResult: null };
   }
   return cache;
 }
@@ -148,11 +194,11 @@ function loadCache(monthKey) {
   if (text) {
     try { cache = JSON.parse(text); } catch { /* 坏缓存当不存在 */ }
   }
-  if (!cache || typeof cache !== 'object') {
-    cache = { version: 1, month: monthKey, peakDays: {}, lastResult: null };
+  if (!cache || typeof cache !== 'object' || cache.version !== 2) {
+    cache = { version: 2, month: monthKey, days: {}, lastResult: null };
   }
   cache = resetCacheIfStale(cache, monthKey);
-  cache.peakDays = cache.peakDays && typeof cache.peakDays === 'object' ? cache.peakDays : {};
+  cache.days = cache.days && typeof cache.days === 'object' ? cache.days : {};
   return cache;
 }
 
@@ -200,11 +246,23 @@ function makeGet(origin, token, timeoutMs) {
 const usageQs = (start, end) =>
   `?startTime=${encodeURIComponent(fmtDateTime(start))}&endTime=${encodeURIComponent(fmtDateTime(end))}`;
 
-// ---------- 单 Key 查询(失败只影响这一张卡,不拖垮其他 Key) ----------
+/** 取一段区间的逐小时序列并按天聚合;分段查询失败向上抛(该 Key 记 error,下次重试) */
+async function fetchSeriesDays(get, start, end) {
+  const d = await get('/api/monitor/usage/model-usage' + usageQs(start, end));
+  if (String(d?.granularity) !== 'hourly' || !Array.isArray(d?.x_time)) {
+    throw new Error(`接口返回粒度异常(granularity=${d?.granularity ?? '无'}),无法拆分高峰`);
+  }
+  return splitSeriesByDay(d.x_time, d.tokensUsage, d.modelCallCount);
+}
+
+/**
+ * 单 Key 查询:档位 + 滚动窗口序列。
+ * fetchFrom = 「第一个缺失的过去日」与「昨天」的较早者(都不存在则昨天),
+ * 保证稳态单请求、昨天整天可自愈、断档自动补齐。
+ */
 async function queryKey(k, now, cache, timeoutMs) {
   const origin = PROVIDER_ORIGIN[k.provider];
   const get = makeGet(origin, k.apiKey, timeoutMs);
-  const monthStart = monthStartOf(now);
   const r = {
     id: k.id,
     name: k.name,
@@ -220,7 +278,6 @@ async function queryKey(k, now, cache, timeoutMs) {
     exhausted: false,
     resetDate: dayKeyOf(nextMonthStartOf(now)),
     error: null,
-    peakMissingDays: 0, // 高峰日查询失败的天数(下次刷新自动补)
   };
 
   let quota;
@@ -232,38 +289,47 @@ async function queryKey(k, now, cache, timeoutMs) {
   }
   r.level = String(quota?.level || '').toUpperCase() || '未知';
 
+  // 计算取数起点
+  const today = dayKeyOf(now);
+  const monthStart = monthStartOf(now);
+  const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const keyDays = cache.days[k.id] || {};
+  let fetchFrom = yesterdayStart;
+  for (let d = new Date(monthStart); dayKeyOf(d) < today; d.setDate(d.getDate() + 1)) {
+    if (!keyDays[dayKeyOf(d)]) { fetchFrom = new Date(d); break; } // 第一个缺失的过去日(含断档空洞)
+  }
+  if (fetchFrom.getTime() < monthStart.getTime()) fetchFrom = new Date(monthStart); // 月初 1 号:不回看上月
+
+  let fetched;
   try {
-    const mu = await get('/api/monitor/usage/model-usage' + usageQs(monthStart, now));
-    r.monthTokens = Number(mu?.totalUsage?.totalTokensUsage) || 0;
+    const merged = {};
+    for (const range of chunkFetchRanges(fetchFrom, now)) {
+      const part = await fetchSeriesDays(get, range.start, range.end);
+      Object.assign(merged, part); // 分段不重叠(边界 23:59:59),直接合并
+    }
+    fetched = merged;
   } catch (e) {
     r.error = e.message;
     return r;
   }
 
-  // 高峰逐日:已闭窗优先读缓存;缓存没有的(月初回填 / 今日进行中)实查;
-  // 只有已闭窗的结果才入缓存(今日进行中的数值还会涨,查完即弃,由 liveToday 计入本次合计)
-  const windows = peakWindowsBetween(monthStart, now);
-  const dayCache = (cache.peakDays[k.id] = cache.peakDays[k.id] || {});
-  const liveToday = {};
-  const pending = windows.filter((w) => !(w.closed && Number.isFinite(dayCache[w.day])));
-  for (let i = 0; i < pending.length; i += PEAK_BACKFILL_BATCH) {
-    await Promise.all(pending.slice(i, i + PEAK_BACKFILL_BATCH).map(async (w) => {
-      try {
-        const pu = await get('/api/monitor/usage/model-usage' + usageQs(w.start, w.end));
-        const t = Number(pu?.totalUsage?.totalTokensUsage) || 0;
-        if (w.closed) dayCache[w.day] = t;
-        else liveToday[w.day] = t;
-      } catch {
-        r.peakMissingDays++;
-      }
-    }));
+  // 结算:过去的天写缓存;今天的只作实时值
+  const todayAgg = fetched[today] || { tokens: 0, peak: 0, calls: 0 };
+  const days = { ...keyDays };
+  for (const [day, v] of Object.entries(fetched)) {
+    if (day < today) days[day] = { tokens: v.tokens, peak: v.peak };
   }
-  r.peakTokens = windows.reduce(
-    (s, w) => s + (Number.isFinite(dayCache[w.day]) ? Number(dayCache[w.day]) : (liveToday[w.day] || 0)),
-    0,
-  );
+  cache.days[k.id] = days;
 
-  r.offPeakTokens = Math.max(0, r.monthTokens - r.peakTokens);
+  let monthTokens = todayAgg.tokens;
+  let peakTokens = todayAgg.peak;
+  for (const v of Object.values(days)) {
+    monthTokens += v.tokens;
+    peakTokens += v.peak;
+  }
+  r.monthTokens = monthTokens;
+  r.peakTokens = peakTokens;
+  r.offPeakTokens = Math.max(0, monthTokens - peakTokens);
   r.weightedTotal = weightedOf(r.offPeakTokens, r.peakTokens);
   r.percent = k.monthlyQuota > 0 ? (r.weightedTotal / k.monthlyQuota) * 100 : 0;
   r.exhausted = r.percent >= 100;
@@ -280,8 +346,8 @@ async function runQuery(timeoutMs = FETCH_TIMEOUT) {
   const cache = loadCache(monthKeyOf(now));
   // 清理已删除 Key 的缓存条目
   const ids = new Set(cfg.keys.map((k) => k.id));
-  for (const id of Object.keys(cache.peakDays)) {
-    if (!ids.has(id)) delete cache.peakDays[id];
+  for (const id of Object.keys(cache.days)) {
+    if (!ids.has(id)) delete cache.days[id];
   }
   const keys = await Promise.all(cfg.keys.map((k) => queryKey(k, now, cache, timeoutMs)));
   const payload = { month: monthKeyOf(now), fetchedAt: now.getTime(), keys };
@@ -344,9 +410,6 @@ function renderKeyCard(k, now) {
   lines.push(`   ${padEndW('高峰期使用', LABEL_W)}${fmtTokens(k.peakTokens)}(×3 折算)`);
   lines.push(`   ${padEndW('非高峰期使用', LABEL_W)}${fmtTokens(k.offPeakTokens)}`);
   lines.push(dim(`   ↻ ${k.resetDate} 重置 · 还剩 ${daysUntilReset(now)} 天 · 总额度 = 非高峰×1 + 高峰×3`));
-  if (k.peakMissingDays > 0) {
-    lines.push(dim(`   (${k.peakMissingDays} 个高峰日查询失败,下次刷新自动补齐)`));
-  }
   return lines.join('\n');
 }
 
