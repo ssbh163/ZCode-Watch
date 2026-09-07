@@ -2,3 +2,6 @@
 Thumbs.db
 desktop.ini
 node_modules/
+
+# 个人笔记,不入库
+新建 Markdown File.md
