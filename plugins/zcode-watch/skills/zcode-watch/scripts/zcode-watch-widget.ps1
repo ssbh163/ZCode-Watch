@@ -281,9 +281,9 @@ function New-KeyCard($k) {
   } elseif ($k.exhausted) {
     $banner = '<TextBlock Text="⚠ 本月已用满 100%,建议删除该 Key" FontSize="10.5" FontWeight="SemiBold" Foreground="#FF5A5A" Margin="0,4,0,2"/>'
   }
-  $missing = ''
-  if (-not $k.error -and [int]$k.peakMissingDays -gt 0) {
-    $missing = ('<TextBlock Text="{0} 个高峰日查询失败,下次刷新自动补齐" FontSize="10" Foreground="{DynamicResource QuaternaryBrush}" Margin="0,3,0,0" TextWrapping="Wrap"/>' -f [int]$k.peakMissingDays)
+  $inc = ''
+  if (-not $k.error -and $k.incomplete) {
+    $inc = '<TextBlock Text="账单数据量过大,本轮未拉完,断点续拉中" FontSize="10" Foreground="{DynamicResource QuaternaryBrush}" Margin="0,3,0,0" TextWrapping="Wrap"/>'
   }
 
   $xaml = @"
@@ -313,7 +313,7 @@ function New-KeyCard($k) {
     <TextBlock Text="$offPeak" FontSize="10.5" HorizontalAlignment="Right" Foreground="{DynamicResource SecondaryBrush}" VerticalAlignment="Center"/>
   </Grid>
   <TextBlock Text="↻ $($k.resetDate) 重置 · 还剩 $resetDays 天" FontSize="10" Foreground="{DynamicResource QuaternaryBrush}" Margin="0,3,0,0"/>
-  $missing
+  $inc
 </StackPanel>
 "@
   return [Windows.Markup.XamlReader]::Parse($xaml)
@@ -403,8 +403,8 @@ function Edit-Config {
   try { Start-Process notepad -ArgumentList "`"$configFile`"" } catch { }
 }
 
-# 自动刷新间隔(分钟)
-$refreshMinutes = 10
+# 自动刷新间隔(分钟);手动 ↗ 实时。110 分钟 + 保底 2h 拉取窗 → 自动刷新也只拉增量 1 页
+$refreshMinutes = 110
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMinutes($refreshMinutes)
 $timer.Add_Tick({ Invoke-Refresh })
