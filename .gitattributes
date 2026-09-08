@@ -5,6 +5,7 @@
 
 # 跨平台脚本：工作区强制 LF，Windows 协作者检出时不会被 autocrlf 转成 CRLF
 *.sh    text eol=lf
+*.swift text eol=lf
 *.mjs   text eol=lf
 *.md    text eol=lf
 *.json  text eol=lf

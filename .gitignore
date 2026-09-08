@@ -6,3 +6,6 @@ node_modules/
 # 个人笔记,不入库
 新建 Markdown File.md
 PROJECT.md
+
+# macos/scripts/zcode-watch.mjs 由 build.sh 编译时从 skills 正本自动同步,是生成物,不入库
+plugins/zcode-watch/macos/scripts/

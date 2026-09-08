@@ -4,9 +4,11 @@
  *
  * 按当前设备选择对应 UI 的悬浮窗:
  *   Windows → WPF 多卡片悬浮窗(zcode-watch-widget.ps1,经 widget-launch.vbs)
- *   其他    → 静默跳过(macOS 原生 HUD 为后续扩展,架构预留此分发点)
+ *   macOS   → 原生 ZCodeWatchHUD.app(需先在 macos/ 目录执行一次 bash build.sh)
+ *   其他    → 静默跳过
  *
- * 语义:已有实例在运行时,通过 touch 唤醒文件把它唤回显示(不抢焦点);没有则静默拉起。
+ * 语义:已有实例在运行时,通过 touch 唤醒文件(Windows)/ open -g reopen(macOS)
+ * 把它唤回显示(不抢焦点);没有则静默拉起。
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -31,5 +33,21 @@ if (process.platform === 'win32') {
   if (fs.existsSync(vbs)) {
     spawn('wscript.exe', [vbs], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
   }
+}
+
+if (process.platform === 'darwin') {
+  // macOS:优先找已编译的 ZCodeWatchHUD.app(插件内 build 产物 → 用户/系统应用目录)
+  // open -g:后台打开,不抢焦点;若已在运行则等价于唤起(reopen 语义)
+  const pluginRoot = path.resolve(dir, '..', '..', '..');
+  const candidates = [
+    path.join(pluginRoot, 'macos', 'ZCodeWatchHUD.app'),
+    path.join(os.homedir(), 'Applications', 'ZCodeWatchHUD.app'),
+    '/Applications/ZCodeWatchHUD.app',
+  ];
+  const app = candidates.find((p) => fs.existsSync(p));
+  if (app) {
+    spawn('open', ['-g', app], { detached: true, stdio: 'ignore' }).unref();
+  }
+  // 未编译时静默跳过——见 macos/README.md,执行一次 bash build.sh 即可
 }
 process.exit(0);

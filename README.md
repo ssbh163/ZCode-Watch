@@ -1,4 +1,4 @@
-# zcode-watch — 0.3.0
+# zcode-watch — 0.4.0
 
 手动登记多把 GLM Coding Plan API Key,集中监控每把 Key 的**自然月用量**(预期 3 把左右):
 
@@ -55,7 +55,7 @@
 
 ### 2. 查看用量
 
-- **桌面悬浮窗(Windows)**:每把 Key 一张卡片(同账号多 Key 各自独立峰时拆分),手动 ↻ 实时刷新、自动每 110 分钟一次(增量只拉最近 2 小时);Ctrl+Shift+G 显隐(zcode-usage 的 Ctrl+G 不冲突);拖拽移动、位置记忆;配色跟随 ZCode 外观深浅
+- **桌面悬浮窗(Windows / macOS)**:每把 Key 一张卡片(同账号多 Key 各自独立峰时拆分),手动 ↻ 实时刷新、自动每 110 分钟一次(增量只拉最近 2 小时);快捷键 Ctrl+Shift+G 显隐。macOS 版为原生 AppKit 悬浮窗(macos/ 目录执行一次 `bash build.sh` 编译)(zcode-usage 的 Ctrl+G 不冲突);拖拽移动、位置记忆;配色跟随 ZCode 外观深浅
 - **对话内**:输入 `/zcode-watch:watch`,或直接问「Key 用量怎么样了」「哪把该删了」
 - **终端**:`node <插件目录>/scripts/zcode-watch.mjs`(加 `--json` 看原始数据)
 
@@ -88,7 +88,7 @@
 账单明细按月整存、无时间过滤参数,首刷会把当月已有明细全量拉取一次(本账号实测 3,300+ 行 7 页),之后每次只按缺口增量拉取(保底 2 小时,稳态 1 页);断档多久就补多久,同一段数据从不重复拉取。
 
 **Q:非 Windows 系统有悬浮窗吗?**
-目前只有 Windows 悬浮窗;macOS/Linux 上技能、命令、终端 CLI 照常可用(启动器会静默跳过悬浮窗)。
+macOS 12+ 有原生悬浮窗:进入插件 `macos/` 目录执行 `bash build.sh` 编译一次(ZCodeWatchHUD.app),SessionStart 钩子会自动唤出;快捷键 Ctrl+Shift+G。Linux 无悬浮窗,技能 / 命令 / CLI 照常可用。
 
 ## 目录结构
 
@@ -119,6 +119,7 @@ ZCode 设置 → 插件管理 → 已安装 → zcode-watch → 卸载。悬浮�
 
 ## 更新日志
 
+- **0.4.0**:新增 **macOS 原生悬浮窗**(ZCodeWatchHUD.app,Swift+AppKit 纯壳,多卡片布局与 Windows 版一致,菜单栏 ⚡ 兜底、位置记忆、node 多路径探测、默认快捷键 Ctrl+Shift+G 与 zcode-usage 共存);widget-launch.mjs 增加 darwin 分发(open -g 幂等唤起);.gitattributes 增加 swift LF 规则。Swift 代码需在 macOS 真机 `bash build.sh` 编译验证。
 - **0.3.0**:数据源改为**账单明细**(费用账单-费用明细,分钟级),实现同账号多把 Key 各自独立的高峰/非高峰拆分(此前监控接口只能给账号级);增量同步采用水位线 + 缺口窗口(保底 2 小时、40 页触顶断点续拉),稳态每账号每次 1~2 请求;悬浮窗自动刷新改为 110 分钟,手动实时;峰时判定纯时间不看折扣比,token 口径只计 输入/输出/缓存命中。
 - **0.2.0**:高峰/非高峰拆分改为**官方接口小时序列求和**(工作日 14:00–17:59 小时桶),彻底修复旧峰窗区间查询的两个缺陷:当天窗口在晚间会坍缩为全天总量(非高峰被计入高峰)、endTime 桶包含语义导致多算 18–19 点。取数改为滚动窗口(昨天→现在)+ 按天缓存:稳态 2 请求/Key,断档自动按 ≤7 天分段补齐,昨天整天自愈。判定基于服务端时间戳字符串,客户端时区无关。
 - **0.1.1**:项目更名 chrome-watch → zcode-watch(目录/文件/命令/技能/互斥量/环境变量/配置路径全量),修复悬浮窗热键与 zcode-usage 冲突(Ctrl+Shift+G)。
