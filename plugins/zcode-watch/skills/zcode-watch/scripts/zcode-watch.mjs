@@ -16,6 +16,12 @@
  *   窗口 = max(2h, gap 向上取整到小时);pullStart 向下取整到整点并 clamp 到月初/backlog;
  *   翻页遇早于 pullStart 的行即停;≥ pullStart 的小时桶整桶覆盖重算(幂等,自愈延迟入库行);
  *   watermark 仅在整轮成功后推进;40 页触顶时推进到已覆盖最早整点并记 backlogUntil 续拉。
+ *
+ * 账号关联(v0.5.0,缓存 v4):主键 = apiKey 段(Key 的稳定身份),keyAccount 记 段→账号;
+ *   段无映射的新 Key 走「发现流程」——拿这把 Key 自己认证全量拉取,行内 customerId 即真实账号,
+ *   不继承任何旧关联。v3 及更早按「配置 key id」关联,id 会被默认命名复用(删旧加新后 key-1
+ *   不再是原来那把 Key),曾导致新 Key 错挂旧账号、跨账号污染与全月历史缺失;迁移时保留账号
+ *   数据、丢弃 id 键控关联,由发现流程重建。
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -173,8 +179,88 @@ export function mergeBuckets(settled, fresh, startHourKey) {
 /** 缓存月份不匹配(进入新自然月)→ 整体重置:月度重置的实现点 */
 export function resetCacheIfStale(cache, monthKey) {
   if (cache.month !== monthKey) {
-    return { version: 3, month: monthKey, accounts: {}, keyAccount: {}, lastResult: null };
+    return { version: 4, month: monthKey, accounts: {}, keyAccount: {}, lastResult: null };
   }
+  return cache;
+}
+
+/**
+ * 旧缓存迁移(v0.5.0):账号数据(settled/watermark/档位)按 customerId 键控,仍然有效全部保留;
+ * v3 的 keyAccount(配置 key id → 账号)、authKeyId、keyMap 均为 id 键控,换 Key 复用 id 时不可信,
+ * 一律丢弃,由下一轮发现流程(拿 Key 自己认证,行内 customerId 权威定账号)重建。
+ */
+export function migrateCache(cache) {
+  if (!cache || typeof cache !== 'object') {
+    return { version: 4, month: null, accounts: {}, keyAccount: {}, lastResult: null };
+  }
+  if (cache.version === 4) return cache;
+  const accounts = {};
+  for (const [cid, s] of Object.entries(cache.accounts || {})) {
+    if (!s || typeof s !== 'object') continue;
+    accounts[cid] = {
+      settled: s.settled && typeof s.settled === 'object' ? s.settled : {},
+      watermark: typeof s.watermark === 'number' ? s.watermark : null,
+      backlogUntil: typeof s.backlogUntil === 'number' ? s.backlogUntil : null,
+      level: typeof s.level === 'string' ? s.level : null,
+      levelAt: typeof s.levelAt === 'number' ? s.levelAt : null,
+    };
+  }
+  return {
+    version: 4,
+    month: typeof cache.month === 'string' ? cache.month : null,
+    accounts,
+    keyAccount: {},
+    lastResult: cache.lastResult ?? null,
+  };
+}
+
+/**
+ * 同步计划(纯函数):
+ *   syncList     每个已知账号一条 { cid, key }(代表拉取的配置 Key,取配置顺序第一把;同账号多 Key 去重)
+ *   discoverList 段无映射(新 Key)或映射悬空(指向不存在账号)的配置 Key —— 走发现流程
+ * 关键不变量:段是身份、id 只是显示名。新 Key 即使复用了旧 id,段不同 → 进 discoverList,
+ * 绝不继承旧 Key 的账号(修复 v0.4.0 及更早的跨账号错挂)。
+ */
+export function buildSyncPlan(keys, keyAccount, accounts) {
+  const seen = new Set();
+  const syncList = [];
+  const discoverList = [];
+  for (const k of keys || []) {
+    const seg = keyIdSegmentOf(k.apiKey);
+    const cid = keyAccount?.[seg];
+    if (!cid || !(cid in (accounts || {}))) { discoverList.push(k); continue; }
+    if (seen.has(cid)) continue;
+    seen.add(cid);
+    syncList.push({ cid, key: k });
+  }
+  return { syncList, discoverList };
+}
+
+/**
+ * 收尾清理(纯函数,每轮保存前执行):
+ *   1) keyAccount 只保留当前配置 Key 的段(已删 Key 的映射清除);
+ *   2) accounts 只保留仍被引用的账号组(旧 Key 的孤儿账号连同 settled 一并清除);
+ *   3) 去污染:某段的正主账号确定后,把该段从其他账号的 settled 里删除
+ *      (历史跨账号错合并的残留;正常流程不会产生,迁移旧污染缓存时兜底)。
+ */
+export function pruneCache(cache, keys) {
+  const segs = new Set((keys || []).map((k) => keyIdSegmentOf(k.apiKey)));
+  const keyAccount = {};
+  for (const [seg, cid] of Object.entries(cache.keyAccount || {})) {
+    if (segs.has(seg)) keyAccount[seg] = cid;
+  }
+  const used = new Set(Object.values(keyAccount));
+  const accounts = {};
+  for (const [cid, s] of Object.entries(cache.accounts || {})) {
+    if (used.has(cid)) accounts[cid] = s;
+  }
+  for (const [seg, cid] of Object.entries(keyAccount)) {
+    for (const [ocid, s] of Object.entries(accounts)) {
+      if (ocid !== cid && s?.settled && seg in s.settled) delete s.settled[seg];
+    }
+  }
+  cache.keyAccount = keyAccount;
+  cache.accounts = accounts;
   return cache;
 }
 
@@ -247,9 +333,7 @@ function loadCache(monthKey) {
   if (text) {
     try { cache = JSON.parse(text); } catch { /* 坏缓存当不存在 */ }
   }
-  if (!cache || typeof cache !== 'object' || cache.version !== 3) {
-    cache = { version: 3, month: monthKey, accounts: {}, keyAccount: {}, lastResult: null };
-  }
+  cache = migrateCache(cache); // v3 → v4(丢弃 id 键控关联);null/坏文件 → 空 v4
   cache = resetCacheIfStale(cache, monthKey);
   if (!cache.accounts || typeof cache.accounts !== 'object') cache.accounts = {};
   if (!cache.keyAccount || typeof cache.keyAccount !== 'object') cache.keyAccount = {};
@@ -398,78 +482,68 @@ async function runQuery(timeoutMs = FETCH_TIMEOUT) {
     return { empty: true, month: monthKey, fetchedAt: nowMs, keys: [] };
   }
   const cache = loadCache(monthKey);
-  const cfgKeyById = new Map(cfg.keys.map((k) => [k.id, k]));
 
-  // 1) 逐账号同步(authKeyId 代表拉取;失败标记账号错误,watermark 不动)
-  const accountErrors = {};   // customerId → error 文案
+  // 1) 同步计划:已知账号增量拉(每账号一把代表 Key);段无映射/悬空的新 Key 走发现流程
+  const { syncList, discoverList } = buildSyncPlan(cfg.keys, cache.keyAccount, cache.accounts);
+  const accountErrors = {};   // customerId(或 solo:段)→ error 文案
   const accountMeta = {};     // customerId → { pages, incomplete }
-  const synced = [];          // [{ customerId, configKey }]
-  const doneAccounts = new Set();
-  // 同步次序:先做已知账号;同账号第二把 Key 不重复拉
-  for (const k of cfg.keys) {
-    const cid = cache.keyAccount[k.id];
-    if (!cid || doneAccounts.has(cid)) continue;
+  const synced = [];          // [{ customerId, configKey, state }](档位拉取用)
+  for (const { cid, key } of syncList) {
     const state = cache.accounts[cid];
-    if (!state) { delete cache.keyAccount[k.id]; continue; }
-    // authKey 优先 state.authKeyId,配置里已删则回退该账号任一已知 Key
-    const authId = cfgKeyById.has(state.authKeyId) ? state.authKeyId : k.id;
-    const authKey = cfgKeyById.get(authId) || k;
-    doneAccounts.add(cid);
     try {
-      const r = await syncAccount(authKey, state, monthKey, nowMs, timeoutMs);
-      state.authKeyId = authKey.id;
-      accountMeta[cid] = { pages: r.pages, incomplete: r.incomplete };
-      synced.push({ customerId: String(r.customerId || cid), configKey: authKey, state });
+      const r = await syncAccount(key, state, monthKey, nowMs, timeoutMs);
+      // solo 组归位:零用量期按 solo:段 建的组,一旦行内暴露真实 customerId 即改名;
+      // 真实账号组已存在则丢弃平行副本(正组自建组起全月覆盖,数据不缺)
+      let realCid = cid;
+      if (String(cid).startsWith('solo:') && r.customerId) {
+        realCid = String(r.customerId);
+        if (!cache.accounts[realCid]) cache.accounts[realCid] = state;
+        delete cache.accounts[cid];
+        for (const [s, c] of Object.entries(cache.keyAccount)) {
+          if (c === cid) cache.keyAccount[s] = realCid;
+        }
+      }
+      accountMeta[realCid] = { pages: r.pages, incomplete: r.incomplete };
+      synced.push({ customerId: realCid, configKey: key, state: cache.accounts[realCid] });
     } catch (e) {
       accountErrors[cid] = e.message;
     }
   }
 
-  // 2) 未归组的配置 Key:独立成组自己拉一次(发现账号 / 借道同账号其他 Key 的行)
-  for (const k of cfg.keys) {
-    if (cache.keyAccount[k.id]) continue;
+  // 2) 发现流程:新 Key 拿自己认证全量拉取,行内 customerId 即真实账号(权威,不继承旧关联)
+  for (const k of discoverList) {
+    const seg = keyIdSegmentOf(k.apiKey);
     const tmp = { settled: {}, watermark: null, backlogUntil: null };
     try {
       const r = await syncAccount(k, tmp, monthKey, nowMs, timeoutMs);
-      const cid = r.customerId ? String(r.customerId) : `solo:${k.id}`;
-      if (r.customerId && cache.accounts[cid]) {
-        // 归入既有账号:数据同源,丢弃临时态,只补映射
-        cache.keyAccount[k.id] = cid;
-      } else {
-        // 新建组:有 customerId → 命名组;零用量 → solo 组(下轮经 keyAccount 走正常同步)
-        tmp.authKeyId = k.id;
+      const cid = r.customerId ? String(r.customerId) : `solo:${seg}`;
+      cache.keyAccount[seg] = cid;
+      if (!(r.customerId && cache.accounts[cid])) {
+        // 新建组:有 customerId → 命名组;零用量 → solo 组(出现用量后由上一步归位)
         cache.accounts[cid] = tmp;
-        cache.keyAccount[k.id] = cid;
         accountMeta[cid] = { pages: r.pages, incomplete: r.incomplete };
         synced.push({ customerId: cid, configKey: k, state: tmp });
       }
+      // 命中既有账号:数据同源(该组自建组起全月覆盖,新段历史已在其中),丢弃临时态,只补映射
     } catch (e) {
-      accountErrors[`solo:${k.id}`] = e.message;
+      accountErrors[`solo:${seg}`] = e.message;
     }
   }
 
-  // 3) 学习 keyMap(账单段 → 配置 key id)与 keyAccount(配置 key id → 账号)
-  for (const k of cfg.keys) {
-    const seg = keyIdSegmentOf(k.apiKey);
-    for (const [cid, state] of Object.entries(cache.accounts)) {
-      if (!state || !state.settled || state.settled[seg] == null) continue;
-      state.keyMap = state.keyMap || {};
-      state.keyMap[seg] = k.id;
-      cache.keyAccount[k.id] = cid;
-    }
-  }
+  // 3) 收尾清理:清已删 Key 的映射/孤儿账号,消除跨账号污染残留
+  pruneCache(cache, cfg.keys);
 
   // 4) 档位(账号级,缓存 1h;失败不阻塞用量展示)
   for (const { customerId, configKey, state } of synced) {
     try { await fetchLevel(configKey, state, nowMs, timeoutMs); } catch { /* 档位失败容忍 */ }
   }
 
-  // 5) 组装每把配置 Key 的卡片
+  // 5) 组装每把配置 Key 的卡片(段 = Key 身份,凭它取本账号 settled 中本段的数据)
   const keys = cfg.keys.map((k) => {
     const seg = keyIdSegmentOf(k.apiKey);
-    const cid = cache.keyAccount[k.id];
+    const cid = cache.keyAccount[seg];
     const state = cid ? cache.accounts[cid] : null;
-    const err = cid ? accountErrors[cid] : accountErrors[`solo:${k.id}`];
+    const err = cid ? accountErrors[cid] : accountErrors[`solo:${seg}`];
     const { tokens, peak } = sumBuckets(state?.settled?.[seg]);
     const offPeak = Math.max(0, tokens - peak);
     const weighted = weightedOf(offPeak, peak);
@@ -499,15 +573,11 @@ async function runQuery(timeoutMs = FETCH_TIMEOUT) {
       accounts: Object.fromEntries(Object.entries(accountMeta).map(([cid, m]) => [cid, m])),
       accountErrors,
       keyAccount: { ...cache.keyAccount },
-      keyMaps: Object.fromEntries(Object.entries(cache.accounts).map(([cid, s]) => [cid, s.keyMap || {}])),
+      syncList: syncList.map(({ cid, key }) => ({ cid, authSeg: keyIdSegmentOf(key.apiKey) })),
+      discoverList: discoverList.map((k) => keyIdSegmentOf(k.apiKey)),
     };
   }
   cache.lastResult = { ts: nowMs, month: monthKey, keys: payload.keys };
-  // 清理已删除 Key 的映射
-  const ids = new Set(cfg.keys.map((k) => k.id));
-  for (const id of Object.keys(cache.keyAccount)) {
-    if (!ids.has(id)) delete cache.keyAccount[id];
-  }
   saveCache(cache);
   return payload;
 }

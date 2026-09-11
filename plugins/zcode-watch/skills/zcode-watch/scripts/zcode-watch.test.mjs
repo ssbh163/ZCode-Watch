@@ -7,7 +7,7 @@ import {
   monthKeyOf, nextMonthStartOf, dayKeyOf,
   parseBillTime, parseTimeWindowStart, isPeakMinute,
   keyIdSegmentOf, aggregateRows, computePullStart, mergeBuckets,
-  weightedOf, parseConfig, resetCacheIfStale,
+  weightedOf, parseConfig, resetCacheIfStale, migrateCache, buildSyncPlan, pruneCache,
   fmtTokens, maskKey, daysUntilReset,
 } from './zcode-watch.mjs';
 
@@ -154,13 +154,87 @@ test('mergeBuckets:多个 Key 段互不影响;固化区的段保留,重算区无
   assert.deepEqual(mergeBuckets({}, {}, 'x'), {});
 });
 
-// ---------- 缓存 v3 ----------
+// ---------- 缓存 v4(段键控关联) ----------
 test('resetCacheIfStale:跨月整体清空;同月原样保留', () => {
-  const stale = { version: 3, month: '2026-08', accounts: { c1: { watermark: 1 } }, keyAccount: { 'key-1': 'c1' }, lastResult: { ts: 1 } };
+  const stale = { version: 4, month: '2026-08', accounts: { c1: { watermark: 1 } }, keyAccount: { aaa: 'c1' }, lastResult: { ts: 1 } };
   const fresh = resetCacheIfStale(stale, '2026-09');
-  assert.deepEqual(fresh, { version: 3, month: '2026-09', accounts: {}, keyAccount: {}, lastResult: null });
-  const same = { version: 3, month: '2026-09', accounts: { c1: { watermark: 2 } }, keyAccount: {}, lastResult: null };
+  assert.deepEqual(fresh, { version: 4, month: '2026-09', accounts: {}, keyAccount: {}, lastResult: null });
+  const same = { version: 4, month: '2026-09', accounts: { c1: { watermark: 2 } }, keyAccount: {}, lastResult: null };
   assert.deepEqual(resetCacheIfStale(same, '2026-09'), same);
+});
+
+test('migrateCache:v3(id 键控)→ v4:账号数据/档位保留,id 关联(keyAccount/authKeyId/keyMap)全丢弃', () => {
+  const v3 = {
+    version: 3, month: '2026-09',
+    accounts: {
+      c1: {
+        authKeyId: 'key-1',
+        keyMap: { oldseg: 'key-1' },
+        watermark: 123, backlogUntil: null,
+        settled: { oldseg: { '2026-09-01 10': { tokens: 5, peak: 0 } } },
+        level: 'MAX', levelAt: 456,
+      },
+    },
+    keyAccount: { 'key-1': 'c1' },  // id 键控:换 Key 复用 key-1 时会错挂,迁移必须丢弃
+    lastResult: { ts: 1 },
+  };
+  const m = migrateCache(v3);
+  assert.equal(m.version, 4);
+  assert.equal(m.month, '2026-09');
+  assert.deepEqual(m.keyAccount, {});
+  assert.deepEqual(m.accounts.c1, {
+    settled: v3.accounts.c1.settled, watermark: 123, backlogUntil: null, level: 'MAX', levelAt: 456,
+  });
+  assert.equal('authKeyId' in m.accounts.c1, false);
+  assert.equal('keyMap' in m.accounts.c1, false);
+  assert.deepEqual(m.lastResult, { ts: 1 });
+});
+
+test('migrateCache:垃圾输入 → 空 v4;已是 v4 → 原样返回', () => {
+  assert.deepEqual(migrateCache(null), { version: 4, month: null, accounts: {}, keyAccount: {}, lastResult: null });
+  assert.deepEqual(migrateCache('oops'), { version: 4, month: null, accounts: {}, keyAccount: {}, lastResult: null });
+  const v4 = { version: 4, month: '2026-09', accounts: { c: {} }, keyAccount: { s: 'c' }, lastResult: null };
+  assert.equal(migrateCache(v4), v4);
+});
+
+// ---------- 同步计划(回归:换 Key 复用 id 不得继承旧账号) ----------
+const K = (id, seg) => ({ id, apiKey: `${seg}.secret`, provider: 'bigmodel' });
+
+test('buildSyncPlan:段无映射的新 Key 走发现流程——即使 id 与旧 Key 相同(v0.4.0 事故回归)', () => {
+  // 旧 Key oldseg 属账号 c1;用户删旧加新,新 Key 复用 id "key-1" 但段是 newseg(另一账号)
+  const plan = buildSyncPlan([K('key-1', 'newseg')], { oldseg: 'c1' }, { c1: {} });
+  assert.deepEqual(plan.syncList, []);                       // 绝不拿新 Key 当 c1 的代表去增量拉
+  assert.equal(plan.discoverList.length, 1);
+  assert.equal(plan.discoverList[0].apiKey, 'newseg.secret'); // 必须走发现流程定位真实账号
+});
+
+test('buildSyncPlan:同账号多 Key 只出一列(取配置顺序第一把为代表);悬空映射走发现', () => {
+  const keys = [K('key-1', 'aaa'), K('key-2', 'bbb'), K('key-3', 'ccc')];
+  const plan = buildSyncPlan(keys, { aaa: 'c1', bbb: 'c1', gone: 'c9' }, { c1: {} });
+  assert.deepEqual(plan.syncList, [{ cid: 'c1', key: keys[0] }]); // c1 一列,代表 = aaa
+  assert.deepEqual(plan.discoverList, [keys[2]]);                 // ccc 无映射;gone→c9 悬空不在此列
+  const plan2 = buildSyncPlan([K('key-4', 'ddd')], { ddd: 'c9' }, { c1: {} });
+  assert.equal(plan2.discoverList.length, 1);                     // 映射指向不存在的账号 → 重新发现
+});
+
+// ---------- 收尾清理 ----------
+test('pruneCache:清已删 Key 的映射与孤儿账号;跨账号污染段从非正主账号剔除', () => {
+  const cache = {
+    version: 4, month: '2026-09',
+    accounts: {
+      c1: { settled: { aaa: { h: 1 }, polluted: { h: 2 } }, watermark: 1 }, // polluted 是 c2 的段,错并入 c1
+      c2: { settled: { polluted: { h: 3 } }, watermark: 2 },
+      c3: { settled: {} },                                                  // 孤儿:无任何映射指向
+    },
+    keyAccount: { aaa: 'c1', polluted: 'c2', deletedSeg: 'c3' },
+    lastResult: null,
+  };
+  pruneCache(cache, [K('key-1', 'aaa'), K('key-2', 'polluted')]);
+  assert.deepEqual(cache.keyAccount, { aaa: 'c1', polluted: 'c2' }); // deletedSeg 清除
+  assert.deepEqual(Object.keys(cache.accounts).sort(), ['c1', 'c2']); // 孤儿 c3 连同数据清除
+  assert.equal('polluted' in cache.accounts.c1.settled, false);       // c1 中的污染残留剔除
+  assert.ok('polluted' in cache.accounts.c2.settled);                 // 正主账号数据不动
+  assert.ok('aaa' in cache.accounts.c1.settled);
 });
 
 // ---------- 加权 / 配置 / 展示(沿用) ----------

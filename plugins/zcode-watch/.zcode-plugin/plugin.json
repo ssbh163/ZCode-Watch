@@ -1,6 +1,6 @@
 {
   "name": "zcode-watch",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "监控多把 GLM Coding Plan API Key 的自然月用量:档位、加权进度条(高峰×3 + 非高峰×1)、满额提醒删除。在 ~/.zcode/zcode-watch.json 手动登记 Key。",
   "author": {
     "name": "zcode-watch contributors"
